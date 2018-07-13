@@ -10,6 +10,7 @@ using Newtonsoft.Json.Linq;
 using Microsoft.Extensions.Configuration;
 using System.IO;
 using System.Threading;
+using System.Reflection;
 
 namespace modbus_notmodbus
 {
@@ -29,18 +30,17 @@ namespace modbus_notmodbus
             //#if !DEBUG
             AppDomain.CurrentDomain.UnhandledException += CallBombSquad;
             //#endif
-            ModbusClient m = new ModbusClient(modbusHost, modbusPort);
-            try
-            {
-                m.Init();
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[EXCEPTION] Exception while instantiating Modbus client: {ex.Message}");
-                //#if !DEBUG
-                Environment.Exit(-1);
-                //#endif
-            }
+            // try
+            // {
+            //     m.Init();
+            // }
+            // catch (Exception ex)
+            // {
+            //     Console.WriteLine($"[EXCEPTION] Exception while instantiating Modbus client: {ex.Message}");
+            //     //#if !DEBUG
+            //     //Environment.Exit(-1);
+            //     //#endif
+            // }
 
             c = DeviceClient.CreateFromConnectionString(deviceConnStr);
             Twin twin = await c.GetTwinAsync();
@@ -61,11 +61,10 @@ namespace modbus_notmodbus
 
             while (true)
             {
-                var tf = new TaskFactory();
-                object telemetryObject = null;
-                Console.WriteLine("block for 5 sec");
-                await tf.ContinueWhenAll(new []{ GetModbusData(m, telemetryObject)}, d => {
-                    Console.WriteLine("continuation...");});
+                object telemetryObject = GetModbusData()?.Result;
+                while (telemetryObject == null) {
+                    telemetryObject = GetModbusData()?.Result;
+                }
 
                 Console.WriteLine("[DEBUG] Serialized telemetry object:\n" +
                     JsonConvert.SerializeObject(telemetryObject, Formatting.Indented));
@@ -98,38 +97,66 @@ namespace modbus_notmodbus
             return Configuration;
         }
 
-        static Task GetModbusData(ModbusClient m, object data)
+        static Task<object> GetModbusData()
         {
             Console.WriteLine("Fetching MODBUS data...");
-            Task t = null;
-            Console.WriteLine("starting timer...");
-            System.Threading.Timer ti = new System.Threading.Timer(tc => {
-                t = Task.Run(() =>
+            ModbusClient m = new ModbusClient(modbusHost, modbusPort);
+            bool modbusClientAlive = false;
+            while (!modbusClientAlive)
+            {
+                try
                 {
-                    Console.WriteLine("in task run");
-                    //short[] voltage = await m.ReadRegistersAsync(40001, 3);
-                    //short[] current = await m.ReadRegistersAsync(41001, 3);
-                    string hardwareId = "Function Code 0x2b (43)";
-                    return Task.FromResult 
-                    (
-                        data = new {
-                            //deviceId = deviceId,
-                            //voltage = voltage,
-                            //current = current,
-                            hardwareId = hardwareId
-                        });
-                });
-            });
-            Console.WriteLine("outside task run");
-            ti.Change(5000, -1);
-            
+                    m.Init();
+                    modbusClientAlive = true;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[EXCEPTION] Exception while instantiating Modbus client: {ex.Message}");
+                    Console.WriteLine("\nSleeping for 15 seconds before retrying to talk to Modbus host...\n");
+                    Task.Delay(TimeSpan.FromSeconds(15)).Wait();
+                }
+            }
+            CancellationToken ct = new CancellationToken();
+            Task<object> t = Task.Run<object>(async () =>
+            {
+                short[] voltage = Array.Empty<short>();
+                short[] current = Array.Empty<short>();
+                string hardwareId = String.Empty;
+                try
+                {
+                    voltage = await m.ReadRegistersAsync(40001, 3);
+                    current = await m.ReadRegistersAsync(41001, 3);
+                    hardwareId = "Function Code 0x2b (43)";
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[EXCEPTION] Exception while calling ReadRegistersAsync(): {ex.Message}");
+                    Console.WriteLine("\nSleeping for 5 seconds before retrying...\n");
+                    Task.Delay(TimeSpan.FromSeconds(5)).Wait();
+                }
+                
+                return new {
+                    deviceId = deviceId,
+                    voltage = voltage,
+                    current = current,
+                    hardwareId = hardwareId
+                };
+            }, ct);
 
-            return t;
+            if (t.Wait(9000, ct))
+            {
+                return t;
+            }
+            else
+            {
+                Console.WriteLine("Aborting modbus Task, took too long to return.");
+                //Console.WriteLine("Restarting collector...\n");
+                //Assembly a = Assembly.GetExecutingAssembly();
+                //System.Diagnostics.Process.Start("dotnet.exe", a.Location);
+                //Environment.Exit(-2);
+                return null;
+            }
         }
-
-
-        // System.Diagnostics.Process.Start(System.AppDomain.CurrentDomain.FriendlyName);
-        // Environment.Exit(-2);
 
         static async Task OnDesiredPropertyChanged(TwinCollection desiredProperties, object userContext)
         {
